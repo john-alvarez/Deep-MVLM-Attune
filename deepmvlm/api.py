@@ -4,6 +4,7 @@ from utils3d import Utils3D
 from utils3d import Render3D
 from prediction import Predict2D
 from torch.utils.model_zoo import load_url
+import os
 # import os
 
 models_urls = {
@@ -55,11 +56,12 @@ models_urls_full = {
 
 
 class DeepMVLM:
-    def __init__(self, config):
+    def __init__(self, config, model_path):
         self.config = config
+        self.model_path = model_path
         # self.device, self.model = self._get_device_and_load_model()
         self.logger = config.get_logger('predict')
-        self.device, self.model = self._get_device_and_load_model_from_url()
+        self.device, self.model = self._get_device_and_load_model()
 
     def _prepare_device(self, n_gpu_use):
         n_gpu = torch.cuda.device_count()
@@ -78,6 +80,30 @@ class DeepMVLM:
         device = torch.device('cuda:0' if n_gpu_use > 0 else 'cpu')
         list_ids = list(range(n_gpu_use))
         return device, list_ids
+    
+    def _get_device_and_load_model(self):
+        logger = self.config.get_logger('test')
+
+        print('Initializing model...')
+        model = self.config.initialize('arch', module_arch)
+
+        # Verify that the provided model path exists
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"Model file not found at: {self.model_path}")
+
+        print(f'Loading checkpoint from: {self.model_path}')
+        device, device_ids = self._prepare_device(self.config['n_gpu'])
+
+        checkpoint = torch.load(self.model_path, map_location=device)
+        state_dict = checkpoint if 'state_dict' not in checkpoint else checkpoint['state_dict']
+
+        if len(device_ids) > 1:
+            model = torch.nn.DataParallel(model, device_ids=device_ids)
+
+        model.load_state_dict(state_dict)
+        model = model.to(device)
+        model.eval()
+        return device, model
 
     def _get_device_and_load_model_from_url(self):
         logger = self.config.get_logger('test')
@@ -121,55 +147,6 @@ class DeepMVLM:
         model.eval()
         return device, model
 
-    # Deprecated - should not be used
-    def _get_device_and_load_model(self):
-        logger = self.config.get_logger('test')
-
-        print('Initialising model')
-        model = self.config.initialize('arch', module_arch)
-        # logger.info(model)
-
-        print('Loading checkpoint')
-        model_name = self.config['name']
-        image_channels = self.config['data_loader']['args']['image_channels']
-        if model_name == "MVLMModel_DTU3D":
-            if image_channels == "geometry":
-                check_point_name = 'saved/trained/MVLMModel_DTU3D_geometry.pth'
-            elif image_channels == "RGB":
-                check_point_name = 'saved/trained/MVLMModel_DTU3D_RGB_07092019.pth'
-            elif image_channels == "depth":
-                check_point_name = 'saved/trained/MVLMModel_DTU3D_Depth_19092019.pth'
-            elif image_channels == "RGB+depth":
-                check_point_name = 'saved/trained/MVLMModel_DTU3D_RGB+depth_20092019.pth'
-            else:
-                print('No model trained for ', model_name, ' with channels ', image_channels)
-                return None, None
-        elif model_name == 'MVLMModel_BU_3DFE':
-            if image_channels == "RGB":
-                check_point_name = 'saved/trained/MVLMModel_BU_3DFE_RGB_24092019_6epoch.pth'
-            else:
-                print('No model trained for ', model_name, ' with channels ', image_channels)
-                return None, None
-        else:
-            print('No model trained for ', model_name)
-            return None
-
-        logger.info('Loading checkpoint: {}'.format(check_point_name))
-
-        device, device_ids = self._prepare_device(self.config['n_gpu'])
-
-        checkpoint = torch.load(check_point_name, map_location=device)
-
-        state_dict = checkpoint['state_dict']
-        if len(device_ids) > 1:
-            model = torch.nn.DataParallel(model, device_ids=device_ids)
-
-        model.load_state_dict(state_dict)
-
-        model = model.to(device)
-        model.eval()
-        return device, model
-
     def predict_one_file(self, file_name):
         render_3d = Render3D(self.config)
         image_stack, transform_stack = render_3d.render_3d_file(file_name)
@@ -185,7 +162,7 @@ class DeepMVLM:
         u3d.compute_all_landmarks_from_view_lines()
         u3d.project_landmarks_to_surface(file_name)
 
-        return u3d.landmarks
+        return u3d.landmarks, heatmap_maxima
 
     @staticmethod
     def write_landmarks_as_vtk_points(landmarks, file_name):
